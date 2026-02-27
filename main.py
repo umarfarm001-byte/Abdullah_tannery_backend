@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,7 +38,6 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
 
-    # Articles table
     c.execute("""
         CREATE TABLE IF NOT EXISTS articles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +61,6 @@ def init_db():
         )
     """)
 
-    # Admins table
     c.execute("""
         CREATE TABLE IF NOT EXISTS admins (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +70,6 @@ def init_db():
         )
     """)
 
-    # Create default admin (username: admin, password: admin123)
     default_hash = hashlib.sha256("admin123".encode()).hexdigest()
     c.execute("""
         INSERT OR IGNORE INTO admins (username, password_hash)
@@ -148,7 +145,8 @@ def health():
     return {"status": "ok"}
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-
+# Matches app: AdminApiService calls /admin/login
+@app.post("/admin/login")
 @app.post("/api/admin/login")
 def login(req: LoginRequest):
     conn = get_db()
@@ -171,6 +169,7 @@ def login(req: LoginRequest):
     conn.close()
     return {"token": token, "username": req.username}
 
+@app.post("/admin/logout")
 @app.post("/api/admin/logout")
 def logout(admin=Depends(get_current_admin)):
     conn = get_db()
@@ -179,28 +178,39 @@ def logout(admin=Depends(get_current_admin)):
     conn.close()
     return {"message": "Logged out successfully"}
 
-# ── Article Search (Public) ───────────────────────────────────────────────────
-
+# ── Article Search ─────────────────────────────────────────────────────────────
+# Matches app: TanneryApiService calls /article/search?query=...
+@app.get("/article/search")
 @app.get("/api/articles/search")
-def search_articles(q: str):
-    if not q or len(q.strip()) < 1:
+def search_articles(query: Optional[str] = None, q: Optional[str] = None):
+    # Accept both ?query= (from app) and ?q= (original)
+    search_term = query or q
+    if not search_term or len(search_term.strip()) < 1:
         raise HTTPException(status_code=400, detail="Search query required")
 
     conn = get_db()
-    query = f"%{q.strip()}%"
+    like = f"%{search_term.strip()}%"
     articles = conn.execute("""
         SELECT * FROM articles
         WHERE article_number LIKE ? OR article_name LIKE ?
         ORDER BY article_number
         LIMIT 20
-    """, (query, query)).fetchall()
+    """, (like, like)).fetchall()
     conn.close()
 
     if not articles:
         raise HTTPException(status_code=404, detail="No articles found")
 
-    return [dict(a) for a in articles]
+    results = [dict(a) for a in articles]
 
+    # Return in format app expects: {found: true, article: {...}}
+    return {
+        "found": True,
+        "article": results[0],
+        "total": len(results)
+    }
+
+@app.get("/article/{article_number}")
 @app.get("/api/articles/{article_number}")
 def get_article(article_number: str):
     conn = get_db()
@@ -217,6 +227,7 @@ def get_article(article_number: str):
 
 # ── Admin Article Management ──────────────────────────────────────────────────
 
+@app.get("/admin/articles")
 @app.get("/api/admin/articles")
 def list_articles(admin=Depends(get_current_admin)):
     conn = get_db()
@@ -226,6 +237,7 @@ def list_articles(admin=Depends(get_current_admin)):
     conn.close()
     return [dict(a) for a in articles]
 
+@app.post("/admin/articles")
 @app.post("/api/admin/articles")
 def create_article(article: ArticleCreate, admin=Depends(get_current_admin)):
     conn = get_db()
@@ -245,11 +257,12 @@ def create_article(article: ArticleCreate, admin=Depends(get_current_admin)):
         ))
         conn.commit()
         conn.close()
-        return {"message": "Article created successfully"}
+        return {"message": "Article created successfully", "success": True}
     except sqlite3.IntegrityError:
         conn.close()
         raise HTTPException(status_code=400, detail="Article number already exists")
 
+@app.put("/admin/articles/{article_number}")
 @app.put("/api/admin/articles/{article_number}")
 def update_article(article_number: str, article: ArticleUpdate, admin=Depends(get_current_admin)):
     conn = get_db()
@@ -272,8 +285,9 @@ def update_article(article_number: str, article: ArticleUpdate, admin=Depends(ge
     )
     conn.commit()
     conn.close()
-    return {"message": "Article updated successfully"}
+    return {"message": "Article updated successfully", "success": True}
 
+@app.delete("/admin/articles/{article_number}")
 @app.delete("/api/admin/articles/{article_number}")
 def delete_article(article_number: str, admin=Depends(get_current_admin)):
     conn = get_db()
@@ -286,10 +300,11 @@ def delete_article(article_number: str, admin=Depends(get_current_admin)):
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Article not found")
 
-    return {"message": "Article deleted successfully"}
+    return {"message": "Article deleted successfully", "success": True}
 
 # ── Image Upload ──────────────────────────────────────────────────────────────
 
+@app.post("/admin/upload-image")
 @app.post("/api/admin/upload-image")
 async def upload_image(
     file: UploadFile = File(...),
@@ -306,4 +321,4 @@ async def upload_image(
     with open(filepath, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    return {"image_url": f"images/{filename}"}
+    return {"image_url": f"images/{filename}", "success": True}
